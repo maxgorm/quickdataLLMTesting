@@ -6,6 +6,7 @@ import anthropic
 import sys  # To exit if no PDF or XLSX found
 import pandas as pd
 from dotenv import load_dotenv
+from portkey_ai import Portkey
 
 # Load environment variables from .env file
 load_dotenv()
@@ -13,6 +14,9 @@ load_dotenv()
 # --- API Keys (WARNING: Hardcoding keys is insecure. Use environment variables or secrets management in production) ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")  # Get from environment variable
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")  # Get from environment variable
+PORTKEY_API_KEY = os.environ.get("PORTKEY_API_KEY")  # Get from environment variable
+PORTKEY_GEMINI_VIRTUAL_KEY = os.environ.get("PORTKEY_GEMINI_VIRTUAL_KEY")  # Get from environment variable
+PORTKEY_CLAUDE_VIRTUAL_KEY = os.environ.get("PORTKEY_CLAUDE_VIRTUAL_KEY")  # Get from environment variable
 
 if not GEMINI_API_KEY:
     print("GEMINI_API_KEY environment variable not set.  Exiting.")
@@ -22,14 +26,37 @@ if not CLAUDE_API_KEY:
     print("CLAUDE_API_KEY environment variable not set.  Exiting.")
     sys.exit(1)
 
+if not PORTKEY_API_KEY:
+    print("PORTKEY_API_KEY environment variable not set.  Exiting.")
+    sys.exit(1)
+
+if not PORTKEY_GEMINI_VIRTUAL_KEY:
+    print("PORTKEY_GEMINI_VIRTUAL_KEY environment variable not set.  Exiting.")
+    sys.exit(1)
+
+if not PORTKEY_CLAUDE_VIRTUAL_KEY:
+    print("PORTKEY_CLAUDE_VIRTUAL_KEY environment variable not set.  Exiting.")
+    sys.exit(1)
+
 # --- Input/Output Directories ---
 INPUT_DIR = "pdf_input"
 OUTPUT_DIR = "json_output"
 
 # --- Configure LLM Clients ---
+# Initialize Portkey
+try:
+    portkey = Portkey(
+        api_key=PORTKEY_API_KEY
+    )
+    print("Portkey client initialized successfully.")
+except Exception as e:
+    print(f"Error initializing Portkey client: {e}")
+    portkey = None
+    sys.exit(1)
+
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest') # Using model from example code
+    gemini_model = genai.GenerativeModel('gemini-2.0-flash')
 except Exception as e:
     print(f"Error configuring Gemini client: {e}")
     # Consider exiting or handling the error appropriately
@@ -288,7 +315,7 @@ def generate_full_prompt(prompt_part, rr_data, first_30_input="", first_30_outpu
 
 def process_rent_roll_file(file_path):
     """
-    Processes a rent roll file (PDF or XLSX) using Claude (for PDFs)
+    Processes a rent roll file (PDF or XLSX) using Claude (for PDFs and initial analysis)
     and Gemini for detailed analysis.
     """
     if not claude_client or not gemini_model:
@@ -308,8 +335,15 @@ def process_rent_roll_file(file_path):
             with open(file_path, "rb") as f:
                 pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
-            print("Sending PDF to Claude for text extraction...")
-            message = claude_client.messages.create(
+            print("Sending PDF to Claude for text extraction via Portkey...")
+            # Use Portkey with Claude virtual key
+            portkey_claude_extraction = Portkey(
+                api_key=PORTKEY_API_KEY,
+                virtual_key=PORTKEY_CLAUDE_VIRTUAL_KEY
+            )
+            
+            # Using Portkey's chat.completions interface for Claude
+            message = portkey_claude_extraction.chat.completions.create(
                 model="claude-3-7-sonnet-20250219",  # Using user specified model
                 max_tokens=4000,  # Increased max_tokens for potentially large PDFs
                 messages=[
@@ -362,33 +396,79 @@ def process_rent_roll_file(file_path):
         print(f"Error during file processing: {e}")
         return None
 
-    # 2. Gemini Call: Analyze Extracted Text
+    # 2. Claude Call: Initial Analysis with PROMPT_PART_1_CLAUDE
     try:
-        # Prepare the prompt for Gemini using the extracted text
-        # For now, we are not using first_30 or previous output context
-        # You might want to implement logic to generate/load these if needed
-        gemini_prompt_text = generate_full_prompt(
-            PROMPT_PART_2_GEMINI,
+        # Prepare the prompt for Claude using the extracted text
+        claude_prompt_text = generate_full_prompt(
+            PROMPT_PART_1_CLAUDE,
             rr_data=extracted_text,
             first_30_input="N/A",  # Placeholder - implement if needed
             first_30_output="N/A",  # Placeholder - implement if needed
             prev_output="N/A",  # Placeholder - implement if needed
         )
 
-        print("Sending extracted text to Gemini for analysis...")
-        response = gemini_model.generate_content(gemini_prompt_text)
+        print("Sending extracted text to Claude for initial analysis via Portkey...")
+        # Use Portkey with Claude virtual key
+        portkey_claude_analysis = Portkey(
+            api_key=PORTKEY_API_KEY,
+            virtual_key=PORTKEY_CLAUDE_VIRTUAL_KEY
+        )
+        
+        # Using Portkey's chat.completions interface for Claude
+        claude_completion = portkey_claude_analysis.chat.completions.create(
+            model="claude-3-7-sonnet-20250219",  # Using user specified model
+            max_tokens=4000,
+            messages=[
+                {
+                    "role": "user",
+                    "content": claude_prompt_text
+                }
+            ]
+        )
+        
+        # Extract Claude's response from Portkey's completion format
+        claude_response_text = claude_completion.choices[0].message.content
+        claude_response_text = claude_response_text.strip()
+        
+        print("Initial analysis received from Claude.")
+        
+        # 3. Gemini Call: Detailed Analysis with PROMPT_PART_2_GEMINI and Claude's response
+        # Prepare the prompt for Gemini using the extracted text and Claude's analysis
+        gemini_prompt_text = generate_full_prompt(
+            PROMPT_PART_2_GEMINI,
+            rr_data=extracted_text,
+            first_30_input="N/A",  # Placeholder - implement if needed
+            first_30_output="N/A",  # Placeholder - implement if needed
+            prev_output=claude_response_text,  # Use Claude's response as previous output
+        )
 
+        print("Sending extracted text and Claude's analysis to Gemini via Portkey...")
+        # Use Portkey with Gemini virtual key
+        portkey_gemini = Portkey(
+            api_key=PORTKEY_API_KEY,
+            virtual_key=PORTKEY_GEMINI_VIRTUAL_KEY
+        )
+        
+        # Create a completion using Portkey
+        gemini_completion = portkey_gemini.chat.completions.create(
+            model="gemini-2.0-flash",
+            messages=[{"role": "user", "content": gemini_prompt_text}]
+        )
+        
+        # Extract the response text
+        gemini_response_text = gemini_completion.choices[0].message.content
+        
         # Clean potential markdown code block fences
-        gemini_response_text = response.text.strip()
+        gemini_response_text = gemini_response_text.strip()
         if gemini_response_text.startswith("```json"):
             gemini_response_text = gemini_response_text[7:]
         if gemini_response_text.endswith("```"):
             gemini_response_text = gemini_response_text[:-3]
         gemini_response_text = gemini_response_text.strip()
 
-        print("Analysis received from Gemini.")
+        print("Final analysis received from Gemini.")
 
-        # 3. Parse Gemini's JSON response
+        # 4. Parse Gemini's JSON response
         try:
             analysis_result = json.loads(gemini_response_text)
             print("Gemini response parsed successfully.")
@@ -401,9 +481,9 @@ def process_rent_roll_file(file_path):
             return None
 
     except Exception as e:
-        print(f"Error during Gemini API call: {e}")
+        print(f"Error during API calls: {e}")
         if hasattr(e, "response"):
-            print(f"Gemini API Response Error Details: {e.response}")
+            print(f"API Response Error Details: {e.response}")
         return None
 
 
